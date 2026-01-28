@@ -1,0 +1,150 @@
+"""
+User management endpoints for admin operations (Asynchronous)
+"""
+from fastapi import APIRouter, Depends, HTTPException, status
+from uuid import UUID
+from sqlalchemy.ext.asyncio import AsyncSession
+from ..database.database import get_db
+from ..schemas.user_schema import UserCreate, UserResponse, UserUpdate
+from ..services import user_service
+from ..utils import auth_utils
+
+router = APIRouter(
+    prefix="/users",
+    tags=["users"]
+)
+
+
+async def check_admin_access(
+    current_user = Depends(auth_utils.get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Verify user has admin privileges for user management.
+    """
+    allowed_roles = ["ADMIN", "SYSTEM_ADMIN"]
+    if current_user.role not in allowed_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only ADMIN or SYSTEM_ADMIN can manage users"
+        )
+    return current_user
+
+
+@router.post("", response_model=UserResponse, status_code=201)
+async def create_user(
+    user: UserCreate,
+    db: AsyncSession = Depends(get_db),
+    admin_user = Depends(check_admin_access)
+):
+    """
+    Create a new user (Admin only).
+    Unlike registration, this allows admins to create users with any role and status.
+    """
+    # Check if email already exists
+    existing_user = await user_service.get_user_by_email(db, email=user.email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Set default status to ACTIVE when admin creates user (skip PENDING)
+    if not user.status:
+        user.status = "ACTIVE"
+    
+    return await user_service.create_user(db=db, user=user)
+
+
+@router.get("", response_model=list[UserResponse])
+async def list_users(
+    status: str = None,
+    role: str = None,
+    db: AsyncSession = Depends(get_db),
+    admin_user = Depends(check_admin_access)
+):
+    """
+    List all users with optional filters (Admin only).
+    """
+    users = await user_service.get_users(db, status=status)
+    
+    # Additional role filter if provided
+    if role:
+        users = [u for u in users if u.role == role]
+    
+    return users
+
+
+@router.get("/{user_id}", response_model=UserResponse)
+async def get_user(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin_user = Depends(check_admin_access)
+):
+    """
+    Get a specific user by ID (Admin only).
+    """
+    user = await user_service.get_user(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    return user
+
+
+@router.patch("/{user_id}", response_model=UserResponse)
+async def update_user(
+    user_id: UUID,
+    user_update: UserUpdate,
+    db: AsyncSession = Depends(get_db),
+    admin_user = Depends(check_admin_access)
+):
+    """
+    Update a user (Admin only).
+    """
+    user = await user_service.get_user(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Update user fields
+    update_data = user_update.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        if field == "password" and value:
+            # Hash the password if being updated
+            from passlib.context import CryptContext
+            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            setattr(user, "password_hash", pwd_context.hash(value))
+        elif hasattr(user, field):
+            setattr(user, field, value)
+    
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+@router.delete("/{user_id}")
+async def delete_user(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin_user = Depends(check_admin_access)
+):
+    """
+    Delete a user (Admin only). This is a soft-delete that sets status to DISABLED.
+    """
+    user = await user_service.get_user(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Soft delete - set status to DISABLED
+    user.status = "DISABLED"
+    await db.commit()
+    
+    return {"status": "success", "message": f"User {user_id} has been disabled"}
+

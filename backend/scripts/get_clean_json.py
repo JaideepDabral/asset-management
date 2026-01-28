@@ -1,0 +1,20 @@
+from database import SessionLocal
+from models import AuditLog
+import json
+
+db = SessionLocal()
+target = '211334710009390'
+
+log = None
+for l in db.query(AuditLog).all():
+    if l.details and isinstance(l.details, dict) and l.details.get('serial_number') == target:
+        log = l
+        break
+
+if log:
+    with open("clean_log_details.json", "w", encoding="utf-8") as f:
+        json.dump(log.details, f, indent=2)
+    print("Clean JSON written to clean_log_details.json")
+else:
+    print("Not found")
+db.close()

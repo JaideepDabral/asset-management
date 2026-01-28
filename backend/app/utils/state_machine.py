@@ -1,0 +1,152 @@
+"""
+State machine validation for AssetRequest workflow
+Enforces valid state transitions according to enterprise ITSM workflow
+"""
+from typing import Dict, List, Set
+
+# Valid state transitions for AssetRequest
+VALID_TRANSITIONS: Dict[str, Set[str]] = {
+    "SUBMITTED": {"MANAGER_APPROVED", "MANAGER_REJECTED"},
+    "MANAGER_APPROVED": {"IT_APPROVED", "IT_REJECTED"},
+    "MANAGER_REJECTED": {"CLOSED"},  # Terminal state
+    "IT_APPROVED": {
+        "PROCUREMENT_REQUESTED",  # Company-owned, no inventory
+        "BYOD_COMPLIANCE_CHECK",  # BYOD path
+        "USER_ACCEPTANCE_PENDING",  # Company-owned, inventory available
+        "IN_USE"  # Direct assignment (legacy support)
+    },
+    "IT_REJECTED": {"CLOSED"},  # Terminal state
+    "PROCUREMENT_REQUESTED": {"PROCUREMENT_APPROVED", "PROCUREMENT_REJECTED"},
+    "PROCUREMENT_APPROVED": {"QC_PENDING"},
+    "PROCUREMENT_REJECTED": {"CLOSED"},  # Terminal state
+    "QC_PENDING": {"QC_FAILED", "USER_ACCEPTANCE_PENDING"},
+    "QC_FAILED": {"PROCUREMENT_REQUESTED"},  # Return to vendor, reorder
+    "BYOD_COMPLIANCE_CHECK": {"BYOD_REJECTED", "IN_USE"},
+    "BYOD_REJECTED": {"CLOSED"},  # Terminal state
+    "USER_ACCEPTANCE_PENDING": {"USER_REJECTED", "IN_USE"},
+    "USER_REJECTED": {"CLOSED"},  # Terminal state
+    "IN_USE": {"CLOSED"},  # Terminal state (normal closure)
+    "CLOSED": set(),  # Terminal state - no further transitions
+}
+
+# Terminal states (workflow ends)
+TERMINAL_STATES: Set[str] = {
+    "MANAGER_REJECTED",
+    "IT_REJECTED",
+    "PROCUREMENT_REJECTED",
+    "BYOD_REJECTED",
+    "USER_REJECTED",
+    "CLOSED"
+}
+
+# States that require specific roles to transition from
+ROLE_REQUIRED_STATES: Dict[str, str] = {
+    "SUBMITTED": "MANAGER",  # Manager approval required
+    "MANAGER_APPROVED": "IT_MANAGEMENT",  # IT approval required
+    "PROCUREMENT_REQUESTED": "PROCUREMENT_FINANCE",  # Finance approval required
+    "QC_PENDING": "ASSET_INVENTORY_MANAGER",  # QC performed by inventory manager
+    "USER_ACCEPTANCE_PENDING": "END_USER",  # User must accept/reject
+}
+
+
+def is_valid_transition(current_status: str, new_status: str) -> bool:
+    """
+    Check if transition from current_status to new_status is valid
+    
+    Args:
+        current_status: Current state of the asset request
+        new_status: Desired new state
+        
+    Returns:
+        True if transition is valid, False otherwise
+    """
+    if current_status not in VALID_TRANSITIONS:
+        return False
+    
+    return new_status in VALID_TRANSITIONS[current_status]
+
+
+def get_valid_next_states(current_status: str) -> Set[str]:
+    """
+    Get all valid next states from current status
+    
+    Args:
+        current_status: Current state of the asset request
+        
+    Returns:
+        Set of valid next states
+    """
+    return VALID_TRANSITIONS.get(current_status, set())
+
+
+def is_terminal_state(status: str) -> bool:
+    """
+    Check if a state is terminal (workflow ends)
+    
+    Args:
+        status: State to check
+        
+    Returns:
+        True if terminal, False otherwise
+    """
+    return status in TERMINAL_STATES
+
+
+def get_required_role_for_transition(current_status: str) -> str:
+    """
+    Get the role required to transition from current status
+    
+    Args:
+        current_status: Current state
+        
+    Returns:
+        Role name required, or empty string if no specific role required
+    """
+    return ROLE_REQUIRED_STATES.get(current_status, "")
+
+
+def validate_state_transition(
+    current_status: str,
+    new_status: str,
+    user_role: str,
+    asset_ownership_type: str = None
+) -> tuple[bool, str]:
+    """
+    Comprehensive validation of state transition
+    
+    Args:
+        current_status: Current state
+        new_status: Desired new state
+        user_role: Role of user attempting transition
+        asset_ownership_type: Type of asset (COMPANY_OWNED | BYOD)
+        
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    # Check if transition is valid
+    if not is_valid_transition(current_status, new_status):
+        return False, f"Invalid transition from {current_status} to {new_status}"
+    
+    # Check if current state is terminal
+    if is_terminal_state(current_status):
+        return False, f"Cannot transition from terminal state {current_status}"
+    
+    # Check role requirements
+    required_role = get_required_role_for_transition(current_status)
+    if required_role:
+        # Special handling for MANAGER role (END_USER with position=MANAGER)
+        if required_role == "MANAGER":
+            if user_role not in ["END_USER", "MANAGER"]:  # Will be checked separately for position
+                return False, f"Transition from {current_status} requires MANAGER role"
+        elif user_role != required_role:
+            return False, f"Transition from {current_status} requires {required_role} role"
+    
+    # Validate asset type specific transitions
+    if current_status == "IT_APPROVED":
+        if asset_ownership_type == "BYOD" and new_status not in {"BYOD_COMPLIANCE_CHECK", "IN_USE"}:
+            return False, "BYOD requests must go through compliance check"
+        elif asset_ownership_type == "COMPANY_OWNED" and new_status == "BYOD_COMPLIANCE_CHECK":
+            return False, "Company-owned assets cannot go through BYOD compliance check"
+    
+    return True, ""
+

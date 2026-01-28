@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+sqlalchemy
+pandas
+openpyxl
+python-dotenv
+psycopg2-binary
+passlib[bcrypt]
+python-jose[cryptography]
+pypdf
+asyncpg
+greenlet
